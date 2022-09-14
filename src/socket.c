@@ -41,15 +41,17 @@ struct socket *solookup(struct socket **last, struct socket *head,
 /*
  * Create a new socket, initialise the fields
  * It is the responsibility of the caller to
- * insque() it into the correct linked-list
+ * slirp_insque() it into the correct linked-list
  */
-struct socket *socreate(Slirp *slirp)
+struct socket *socreate(Slirp *slirp, int type)
 {
     struct socket *so = g_new(struct socket, 1);
 
     memset(so, 0, sizeof(struct socket));
+    so->so_type = type;
     so->so_state = SS_NOFDREF;
     so->s = -1;
+    so->s_aux = -1;
     so->slirp = slirp;
     so->pollfds_idx = -1;
 
@@ -59,11 +61,11 @@ struct socket *socreate(Slirp *slirp)
 /*
  * Remove references to so from the given message queue.
  */
-static void soqfree(struct socket *so, struct quehead *qh)
+static void soqfree(struct socket *so, struct slirp_quehead *qh)
 {
     struct mbuf *ifq;
 
-    for (ifq = (struct mbuf *)qh->qh_link; (struct quehead *)ifq != qh;
+    for (ifq = (struct mbuf *)qh->qh_link; (struct slirp_quehead *)ifq != qh;
          ifq = ifq->ifq_next) {
         if (ifq->ifq_so == so) {
             struct mbuf *ifm;
@@ -76,11 +78,15 @@ static void soqfree(struct socket *so, struct quehead *qh)
 }
 
 /*
- * remque and free a socket, clobber cache
+ * slirp_remque and free a socket, clobber cache
  */
 void sofree(struct socket *so)
 {
     Slirp *slirp = so->slirp;
+
+    if (so->s_aux != -1) {
+        closesocket(so->s_aux);
+    }
 
     soqfree(so, &slirp->if_fastq);
     soqfree(so, &slirp->if_batchq);
@@ -95,7 +101,7 @@ void sofree(struct socket *so)
     m_free(so->so_m);
 
     if (so->so_next && so->so_prev)
-        remque(so); /* crashes if so is not in a queue */
+        slirp_remque(so); /* crashes if so is not in a queue */
 
     if (so->so_tcpcb) {
         g_free(so->so_tcpcb);
@@ -211,8 +217,8 @@ int soread(struct socket *so)
                        errno, strerror(errno));
             sofcantrcvmore(so);
 
-            if (err == ECONNRESET || err == ECONNREFUSED || err == ENOTCONN ||
-                err == EPIPE) {
+            if (err == ECONNABORTED || err == ECONNRESET || err == ECONNREFUSED ||
+                err == ENOTCONN || err == EPIPE) {
                 tcp_drop(sototcpcb(so), err);
             } else {
                 tcp_sockclosed(sototcpcb(so));
@@ -369,7 +375,7 @@ int sosendoob(struct socket *so)
             len += n;
         }
         n = slirp_send(so, buff, len, (MSG_OOB)); /* |MSG_DONTWAIT)); */
-#ifdef DEBUG
+#ifdef SLIRP_DEBUG
         if (n != len) {
             DEBUG_ERROR("Didn't send all data urgently XXXXX");
         }
@@ -773,14 +779,35 @@ struct socket *tcpx_listen(Slirp *slirp,
     char addrstr[INET6_ADDRSTRLEN];
     char portstr[6];
     int ret;
-    ret = getnameinfo(haddr, haddrlen, addrstr, sizeof(addrstr), portstr, sizeof(portstr), NI_NUMERICHOST|NI_NUMERICSERV);
-    g_assert(ret == 0);
-    DEBUG_ARG("haddr = %s", addrstr);
-    DEBUG_ARG("hport = %s", portstr);
-    ret = getnameinfo(laddr, laddrlen, addrstr, sizeof(addrstr), portstr, sizeof(portstr), NI_NUMERICHOST|NI_NUMERICSERV);
-    g_assert(ret == 0);
-    DEBUG_ARG("laddr = %s", addrstr);
-    DEBUG_ARG("lport = %s", portstr);
+    switch (haddr->sa_family) {
+    case AF_INET:
+    case AF_INET6:
+        ret = getnameinfo(haddr, haddrlen, addrstr, sizeof(addrstr), portstr, sizeof(portstr), NI_NUMERICHOST|NI_NUMERICSERV);
+        g_assert(ret == 0);
+        DEBUG_ARG("hfamily = INET");
+        DEBUG_ARG("haddr = %s", addrstr);
+        DEBUG_ARG("hport = %s", portstr);
+        break;
+#ifndef _WIN32
+    case AF_UNIX:
+        DEBUG_ARG("hfamily = UNIX");
+        DEBUG_ARG("hpath = %s", ((struct sockaddr_un *) haddr)->sun_path);
+        break;
+#endif
+    default:
+        g_assert_not_reached();
+    }
+    switch (laddr->sa_family) {
+    case AF_INET:
+    case AF_INET6:
+        ret = getnameinfo(laddr, laddrlen, addrstr, sizeof(addrstr), portstr, sizeof(portstr), NI_NUMERICHOST|NI_NUMERICSERV);
+        g_assert(ret == 0);
+        DEBUG_ARG("laddr = %s", addrstr);
+        DEBUG_ARG("lport = %s", portstr);
+        break;
+    default:
+        g_assert_not_reached();
+    }
     DEBUG_ARG("flags = %x", flags);
 
     /*
@@ -792,11 +819,11 @@ struct socket *tcpx_listen(Slirp *slirp,
      */
     g_assert(!((flags & SS_HOSTFWD) && (flags & SS_FACCEPTONCE)));
 
-    so = socreate(slirp);
+    so = socreate(slirp, IPPROTO_TCP);
 
     /* Don't tcp_attach... we don't need so_snd nor so_rcv */
     so->so_tcpcb = tcp_newtcpcb(so);
-    insque(so, &slirp->tcb);
+    slirp_insque(so, &slirp->tcb);
 
     /*
      * SS_FACCEPTONCE sockets must time out.
@@ -1040,6 +1067,108 @@ void sotranslate_accept(struct socket *so)
             so->so_faddr6 = slirp->vhost_addr6;
         }
         break;
+
+    case AF_UNIX: {
+        /* Translate Unix socket to random ephemeral source port. We obtain
+         * this source port by binding to port 0 so that the OS allocates a
+         * port for us. If this fails, we fall back to choosing a random port
+         * with a random number generator. */
+        int s;
+        struct sockaddr_in in_addr;
+        struct sockaddr_in6 in6_addr;
+        socklen_t in_addr_len;
+
+        if (so->slirp->in_enabled) {
+            so->so_ffamily = AF_INET;
+            so->so_faddr = slirp->vhost_addr;
+            so->so_fport = 0;
+
+            switch (so->so_type) {
+            case IPPROTO_TCP:
+                s = slirp_socket(PF_INET, SOCK_STREAM, 0);
+                break;
+            case IPPROTO_UDP:
+                s = slirp_socket(PF_INET, SOCK_DGRAM, 0);
+                break;
+            default:
+                g_assert_not_reached();
+                break;
+            }
+            if (s < 0) {
+                g_error("Ephemeral slirp_socket() allocation failed");
+                goto unix2inet_cont;
+            }
+            memset(&in_addr, 0, sizeof(in_addr));
+            in_addr.sin_family = AF_INET;
+            in_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            in_addr.sin_port = htons(0);
+            if (bind(s, (struct sockaddr *) &in_addr, sizeof(in_addr))) {
+                g_error("Ephemeral bind() failed");
+                closesocket(s);
+                goto unix2inet_cont;
+            }
+            in_addr_len = sizeof(in_addr);
+            if (getsockname(s, (struct sockaddr *) &in_addr, &in_addr_len)) {
+                g_error("Ephemeral getsockname() failed");
+                closesocket(s);
+                goto unix2inet_cont;
+            }
+            so->s_aux = s;
+            so->so_fport = in_addr.sin_port;
+
+unix2inet_cont:
+            if (!so->so_fport) {
+                g_warning("Falling back to random port allocation");
+                so->so_fport = htons(g_rand_int_range(slirp->grand, 49152, 65536));
+            }
+        } else if (so->slirp->in6_enabled) {
+            so->so_ffamily = AF_INET6;
+            so->so_faddr6 = slirp->vhost_addr6;
+            so->so_fport6 = 0;
+
+            switch (so->so_type) {
+            case IPPROTO_TCP:
+                s = slirp_socket(PF_INET6, SOCK_STREAM, 0);
+                break;
+            case IPPROTO_UDP:
+                s = slirp_socket(PF_INET6, SOCK_DGRAM, 0);
+                break;
+            default:
+                g_assert_not_reached();
+                break;
+            }
+            if (s < 0) {
+                g_error("Ephemeral slirp_socket() allocation failed");
+                goto unix2inet6_cont;
+            }
+            memset(&in6_addr, 0, sizeof(in6_addr));
+            in6_addr.sin6_family = AF_INET6;
+            in6_addr.sin6_addr = in6addr_loopback;
+            in6_addr.sin6_port = htons(0);
+            if (bind(s, (struct sockaddr *) &in6_addr, sizeof(in6_addr))) {
+                g_error("Ephemeral bind() failed");
+                closesocket(s);
+                goto unix2inet6_cont;
+            }
+            in_addr_len = sizeof(in6_addr);
+            if (getsockname(s, (struct sockaddr *) &in6_addr, &in_addr_len)) {
+                g_error("Ephemeral getsockname() failed");
+                closesocket(s);
+                goto unix2inet6_cont;
+            }
+            so->s_aux = s;
+            so->so_fport6 = in6_addr.sin6_port;
+
+unix2inet6_cont:
+            if (!so->so_fport6) {
+                g_warning("Falling back to random port allocation");
+                so->so_fport6 = htons(g_rand_int_range(slirp->grand, 49152, 65536));
+            }
+        } else {
+            g_assert_not_reached();
+        }
+        break;
+    } /* case AF_UNIX */
 
     default:
         break;

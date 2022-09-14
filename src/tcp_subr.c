@@ -329,7 +329,7 @@ struct tcpcb *tcp_close(struct tcpcb *tp)
     while (!tcpfrag_list_end(t, tp)) {
         t = tcpiphdr_next(t);
         m = tcpiphdr_prev(t)->ti_mbuf;
-        remque(tcpiphdr2qlink(tcpiphdr_prev(t)));
+        slirp_remque(tcpiphdr2qlink(tcpiphdr_prev(t)));
         m_free(m);
     }
     g_free(tp);
@@ -464,7 +464,7 @@ void tcp_connect(struct socket *inso)
     Slirp *slirp = inso->slirp;
     struct socket *so;
     struct sockaddr_storage addr;
-    socklen_t addrlen = sizeof(struct sockaddr_storage);
+    socklen_t addrlen;
     struct tcpcb *tp;
     int s, opt, ret;
     /* AF_INET6 addresses are bigger than AF_INET, so this is big enough. */
@@ -473,7 +473,17 @@ void tcp_connect(struct socket *inso)
 
     DEBUG_CALL("tcp_connect");
     DEBUG_ARG("inso = %p", inso);
-    ret = getnameinfo((const struct sockaddr *) &inso->lhost.ss, sizeof(inso->lhost.ss), addrstr, sizeof(addrstr), portstr, sizeof(portstr), NI_NUMERICHOST|NI_NUMERICSERV);
+    switch (inso->lhost.ss.ss_family) {
+    case AF_INET:
+        addrlen = sizeof(struct sockaddr_in);
+        break;
+    case AF_INET6:
+        addrlen = sizeof(struct sockaddr_in6);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+    ret = getnameinfo((const struct sockaddr *) &inso->lhost.ss, addrlen, addrstr, sizeof(addrstr), portstr, sizeof(portstr), NI_NUMERICHOST|NI_NUMERICSERV);
     g_assert(ret == 0);
     DEBUG_ARG("ip = [%s]:%s", addrstr, portstr);
     DEBUG_ARG("so_state = 0x%x", inso->so_state);
@@ -494,6 +504,7 @@ void tcp_connect(struct socket *inso)
              * us again until the guest address is available.
              */
             DEBUG_MISC(" guest address not available yet");
+            addrlen = sizeof(addr);
             s = accept(inso->s, (struct sockaddr *)&addr, &addrlen);
             if (s >= 0) {
                 close(s);
@@ -510,7 +521,7 @@ void tcp_connect(struct socket *inso)
         /* FACCEPTONCE already have a tcpcb */
         so = inso;
     } else {
-        so = socreate(slirp);
+        so = socreate(slirp, IPPROTO_TCP);
         tcp_attach(so);
         so->lhost = inso->lhost;
         so->so_ffamily = inso->so_ffamily;
@@ -518,6 +529,7 @@ void tcp_connect(struct socket *inso)
 
     tcp_mss(sototcpcb(so), 0);
 
+    addrlen = sizeof(addr);
     s = accept(inso->s, (struct sockaddr *)&addr, &addrlen);
     if (s < 0) {
         tcp_close(sototcpcb(so)); /* This will sofree() as well */
@@ -565,7 +577,7 @@ void tcp_connect(struct socket *inso)
 void tcp_attach(struct socket *so)
 {
     so->so_tcpcb = tcp_newtcpcb(so);
-    insque(so, &so->slirp->tcb);
+    slirp_insque(so, &so->slirp->tcb);
 }
 
 /*

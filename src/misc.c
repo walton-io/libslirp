@@ -8,22 +8,22 @@
 #include <sys/un.h>
 #endif
 
-inline void insque(void *a, void *b)
+void slirp_insque(void *a, void *b)
 {
-    register struct quehead *element = (struct quehead *)a;
-    register struct quehead *head = (struct quehead *)b;
+    register struct slirp_quehead *element = (struct slirp_quehead *)a;
+    register struct slirp_quehead *head = (struct slirp_quehead *)b;
     element->qh_link = head->qh_link;
-    head->qh_link = (struct quehead *)element;
-    element->qh_rlink = (struct quehead *)head;
-    ((struct quehead *)(element->qh_link))->qh_rlink =
-        (struct quehead *)element;
+    head->qh_link = (struct slirp_quehead *)element;
+    element->qh_rlink = (struct slirp_quehead *)head;
+    ((struct slirp_quehead *)(element->qh_link))->qh_rlink =
+        (struct slirp_quehead *)element;
 }
 
-inline void remque(void *a)
+void slirp_remque(void *a)
 {
-    register struct quehead *element = (struct quehead *)a;
-    ((struct quehead *)(element->qh_link))->qh_rlink = element->qh_rlink;
-    ((struct quehead *)(element->qh_rlink))->qh_link = element->qh_link;
+    register struct slirp_quehead *element = (struct slirp_quehead *)a;
+    ((struct slirp_quehead *)(element->qh_link))->qh_rlink = element->qh_rlink;
+    ((struct slirp_quehead *)(element->qh_rlink))->qh_link = element->qh_link;
     element->qh_rlink = NULL;
 }
 
@@ -82,7 +82,7 @@ static int slirp_socketpair_with_oob(int sv[2])
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_port = 0,
-        .sin_addr.s_addr = INADDR_ANY,
+        .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
     };
     socklen_t addrlen = sizeof(addr);
     int ret, s;
@@ -147,8 +147,10 @@ static void fork_exec_child_setup(gpointer data)
 #endif
 }
 
+#ifdef __GNUC__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
 
 #if !GLIB_CHECK_VERSION(2, 58, 0)
 typedef struct SlirpGSpawnFds {
@@ -198,7 +200,9 @@ g_spawn_async_with_fds_slirp(const gchar *working_directory, gchar **argv,
 #define g_spawn_async_with_fds(wd, argv, env, f, c, d, p, ifd, ofd, efd, err) \
     g_spawn_async_with_fds_slirp(wd, argv, env, f, c, d, p, ifd, ofd, efd, err)
 
+#ifdef __GNUC__
 #pragma GCC diagnostic pop
+#endif
 
 int fork_exec(struct socket *so, const char *ex)
 {
@@ -301,6 +305,7 @@ char *slirp_connection_info(Slirp *slirp)
     uint16_t dst_port;
     struct socket *so;
     const char *state;
+    char addr[INET_ADDRSTRLEN];
     char buf[20];
 
     g_string_append_printf(str,
@@ -330,10 +335,11 @@ char *slirp_connection_info(Slirp *slirp)
         }
         slirp_fmt0(buf, sizeof(buf), "  TCP[%s]", state);
         g_string_append_printf(str, "%-19s %3d %15s %5d ", buf, so->s,
-                               src.sin_addr.s_addr ? inet_ntoa(src.sin_addr) :
-                                                     "*",
+                               src.sin_addr.s_addr ?
+                               inet_ntop(AF_INET, &src.sin_addr, addr, sizeof(addr)) : "*",
                                ntohs(src.sin_port));
-        g_string_append_printf(str, "%15s %5d %5d %5d\n", inet_ntoa(dst_addr),
+        g_string_append_printf(str, "%15s %5d %5d %5d\n",
+                               inet_ntop(AF_INET, &dst_addr, addr, sizeof(addr)),
                                ntohs(dst_port), so->so_rcv.sb_cc,
                                so->so_snd.sb_cc);
     }
@@ -354,10 +360,11 @@ char *slirp_connection_info(Slirp *slirp)
             dst_port = so->so_fport;
         }
         g_string_append_printf(str, "%-19s %3d %15s %5d ", buf, so->s,
-                               src.sin_addr.s_addr ? inet_ntoa(src.sin_addr) :
-                                                     "*",
+                               src.sin_addr.s_addr ?
+                               inet_ntop(AF_INET, &src.sin_addr, addr, sizeof(addr)) : "*",
                                ntohs(src.sin_port));
-        g_string_append_printf(str, "%15s %5d %5d %5d\n", inet_ntoa(dst_addr),
+        g_string_append_printf(str, "%15s %5d %5d %5d\n",
+                               inet_ntop(AF_INET, &dst_addr, addr, sizeof(addr)),
                                ntohs(dst_port), so->so_rcv.sb_cc,
                                so->so_snd.sb_cc);
     }
@@ -368,9 +375,10 @@ char *slirp_connection_info(Slirp *slirp)
         src.sin_addr = so->so_laddr;
         dst_addr = so->so_faddr;
         g_string_append_printf(str, "%-19s %3d %15s  -    ", buf, so->s,
-                               src.sin_addr.s_addr ? inet_ntoa(src.sin_addr) :
-                                                     "*");
-        g_string_append_printf(str, "%15s  -    %5d %5d\n", inet_ntoa(dst_addr),
+                               src.sin_addr.s_addr ?
+                               inet_ntop(AF_INET, &src.sin_addr, addr, sizeof(addr)) : "*");
+        g_string_append_printf(str, "%15s  -    %5d %5d\n",
+                               inet_ntop(AF_INET, &dst_addr, addr, sizeof(addr)),
                                so->so_rcv.sb_cc, so->so_snd.sb_cc);
     }
 

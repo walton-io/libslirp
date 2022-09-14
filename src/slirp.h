@@ -6,7 +6,7 @@
 
 /* as defined in sdkddkver.h */
 #ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600 /* Vista */
+#define _WIN32_WINNT 0x0601 /* Windows 7 */
 #endif
 /* reduces the number of implicitly included headers */
 #ifndef WIN32_LEAN_AND_MEAN
@@ -20,9 +20,7 @@
 #include <iphlpapi.h>
 
 #else
-#if !defined(__HAIKU__)
 #define O_BINARY 0
-#endif
 #endif
 
 #ifndef _WIN32
@@ -36,12 +34,6 @@
 #ifdef __APPLE__
 #include <sys/filio.h>
 #endif
-
-/* Avoid conflicting with the libc insque() and remque(), which
-   have different prototypes. */
-#define insque slirp_insque
-#define remque slirp_remque
-#define quehead slirp_quehead
 
 #include "debug.h"
 #include "util.h"
@@ -75,6 +67,7 @@ struct ethhdr {
     unsigned short h_proto; /* packet type ID field */
 };
 
+SLIRP_PACKED_BEGIN
 struct slirp_arphdr {
     unsigned short ar_hrd; /* format of hardware address */
     unsigned short ar_pro; /* format of protocol address */
@@ -89,7 +82,7 @@ struct slirp_arphdr {
     uint32_t ar_sip; /* sender IP address       */
     uint8_t ar_tha[ETH_ALEN]; /* target hardware address */
     uint32_t ar_tip; /* target IP address       */
-} SLIRP_PACKED;
+} SLIRP_PACKED_END;
 
 #define ARP_TABLE_SIZE 16
 
@@ -128,6 +121,8 @@ bool ndp_table_search(Slirp *slirp, struct in6_addr ip_addr,
                       uint8_t out_ethaddr[ETH_ALEN]);
 
 struct Slirp {
+    int cfg_version;
+
     unsigned time_fasttimo;
     unsigned last_slowtimo;
     bool do_slowtimo;
@@ -141,6 +136,7 @@ struct Slirp {
     struct in6_addr vprefix_addr6;
     uint8_t vprefix_len;
     struct in6_addr vhost_addr6;
+    bool disable_dhcp; /* slirp will not reply to any DHCP requests */
     struct in_addr vdhcp_startaddr;
     struct in_addr vnameserver_addr;
     struct in6_addr vnameserver_addr6;
@@ -156,14 +152,17 @@ struct Slirp {
 
     bool disable_host_loopback;
 
+    uint32_t mfr_id;
+    uint8_t oob_eth_addr[ETH_ALEN];
+
     /* mbuf states */
-    struct quehead m_freelist;
-    struct quehead m_usedlist;
+    struct slirp_quehead m_freelist;
+    struct slirp_quehead m_usedlist;
     int mbuf_alloced;
 
     /* if states */
-    struct quehead if_fastq; /* fast queue (for interactive data) */
-    struct quehead if_batchq; /* queue for non-interactive data */
+    struct slirp_quehead if_fastq; /* fast queue (for interactive data) */
+    struct slirp_quehead if_batchq; /* queue for non-interactive data */
     bool if_start_busy; /* avoid if_start recursion */
 
     /* ip states */
@@ -251,7 +250,7 @@ void ip_stripoptions(register struct mbuf *, struct mbuf *);
 int ip_output(struct socket *, struct mbuf *);
 
 /* ip6_input.c */
-void ip6_init(Slirp *);
+void ip6_post_init(Slirp *);
 void ip6_cleanup(Slirp *);
 void ip6_input(struct mbuf *);
 
@@ -287,5 +286,6 @@ struct socket *slirp_find_ctl_socket(Slirp *slirp, struct in_addr guest_addr,
                                      int guest_port);
 
 void slirp_send_packet_all(Slirp *slirp, const void *buf, size_t len);
+void *slirp_timer_new(Slirp *slirp, SlirpTimerId id, void *cb_opaque);
 
 #endif

@@ -1,5 +1,5 @@
 project('libslirp', 'c',
-  version : '4.6.1',
+  version : '4.7.0',
   license : 'BSD-3-Clause',
   default_options : ['warning_level=1', 'c_std=gnu99'],
   meson_version : '>= 0.50',
@@ -16,14 +16,22 @@ conf.set('SLIRP_MAJOR_VERSION', major_version)
 conf.set('SLIRP_MINOR_VERSION', minor_version)
 conf.set('SLIRP_MICRO_VERSION', micro_version)
 
-full_version = run_command('build-aux/git-version-gen',
-                           '@0@/.tarball-version'.format(meson.current_source_dir()),
-                           check : true).stdout().strip()
-if full_version.startswith('UNKNOWN')
+cc = meson.get_compiler('c')
+
+if cc.get_argument_syntax() != 'msvc'
+  r = run_command('build-aux/git-version-gen',
+                  '@0@/.tarball-version'.format(meson.current_source_dir()),
+                  check : false)
+
+  full_version = r.stdout().strip()
+  if r.returncode() != 0 or full_version.startswith('UNKNOWN')
+    full_version = meson.project_version()
+  elif not full_version.startswith(meson.project_version())
+    error('meson.build project version @0@ does not match git-describe output @1@'
+          .format(meson.project_version(), full_version))
+  endif
+else
   full_version = meson.project_version()
-elif not full_version.startswith(meson.project_version())
-  error('meson.build project version @0@ does not match git-describe output @1@'
-        .format(meson.project_version(), full_version))
 endif
 conf.set_quoted('SLIRP_VERSION_STRING', full_version + get_option('version_suffix'))
 
@@ -44,16 +52,18 @@ conf.set_quoted('SLIRP_VERSION_STRING', full_version + get_option('version_suffi
 # - If the interface is the same as the previous version, but bugs are
 #   fixed, change:
 #      REVISION += 1
-lt_current = 3
-lt_revision = 1
-lt_age = 3
+lt_current = 4
+lt_revision = 0
+lt_age = 4
 lt_version = '@0@.@1@.@2@'.format(lt_current - lt_age, lt_age, lt_revision)
 
 host_system = host_machine.system()
 
 glib_dep = dependency('glib-2.0')
 
-cc = meson.get_compiler('c')
+add_project_arguments(cc.get_supported_arguments('-Wmissing-prototypes', '-Wstrict-prototypes',
+                                                 '-Wredundant-decls', '-Wundef', '-Wwrite-strings'),
+                      language: 'c', native: false)
 
 platform_deps = []
 
@@ -66,10 +76,15 @@ elif host_system == 'darwin'
   platform_deps += [
     cc.find_library('resolv')
   ]
+elif host_system == 'haiku'
+  platform_deps += [
+    cc.find_library('network')
+  ]
 endif
 
 cargs = [
   '-DG_LOG_DOMAIN="Slirp"',
+  '-DBUILDING_LIBSLIRP',
 ]
 
 if cc.check_header('valgrind/valgrind.h')
@@ -135,6 +150,22 @@ lib = library('slirp', sources,
   dependencies : [glib_dep, platform_deps],
   install : install_devel or get_option('default_library') == 'shared',
 )
+
+pingtest = executable('pingtest', 'test/pingtest.c',
+  link_with: [ lib ],
+  include_directories: [ 'src' ],
+  dependencies : [ platform_deps ]
+)
+
+test('ping', pingtest)
+
+ncsitest = executable('ncsitest', 'test/ncsitest.c',
+  link_with: [lib],
+  include_directories: ['src'],
+  dependencies: [glib_dep, platform_deps]
+)
+
+test('ncsi', ncsitest)
 
 if install_devel
   install_headers(['src/libslirp.h'], subdir : 'slirp')

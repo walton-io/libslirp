@@ -34,9 +34,11 @@
 
 #define LEASE_TIME (24 * 3600)
 
+#define UEFI_HTTP_VENDOR_CLASS_ID "HTTPClient"
+
 static const uint8_t rfc1533_cookie[] = { RFC1533_COOKIE };
 
-#define DPRINTF(fmt, ...) DEBUG_CALL(fmt, ##__VA_ARGS__)
+#define DPRINTF(...) DEBUG_RAW_CALL(__VA_ARGS__)
 
 static BOOTPClient *get_new_addr(Slirp *slirp, struct in_addr *paddr,
                                  const uint8_t *macaddr)
@@ -340,6 +342,27 @@ static void bootp_reply(Slirp *slirp,
                 q += val;
             }
         }
+
+        /* this allows to support UEFI HTTP boot: according to the UEFI
+           specification, DHCP server must send vendor class identifier option
+           set to "HTTPClient" string, when responding to DHCP requests as part
+           of the UEFI HTTP boot
+
+           we assume that, if the bootfile parameter was configured as an http
+           URL, the user intends to perform UEFI HTTP boot, so send this option
+           automatically */
+        if (slirp->bootp_filename && g_str_has_prefix(slirp->bootp_filename, "http://")) {
+            val = strlen(UEFI_HTTP_VENDOR_CLASS_ID);
+            if (q + val + 2 >= end) {
+                g_warning("DHCP packet size exceeded, "
+                          "omitting vendor class id option.");
+            } else {
+                *q++ = RFC2132_VENDOR_CLASS_ID;
+                *q++ = val;
+                memcpy(q, UEFI_HTTP_VENDOR_CLASS_ID, val);
+                q += val;
+            }
+        }
     } else {
         static const char nak_msg[] = "requested address not available";
 
@@ -355,13 +378,13 @@ static void bootp_reply(Slirp *slirp,
         q += sizeof(nak_msg) - 1;
     }
     assert(q < end);
-    *q = RFC1533_END;
+    *q++ = RFC1533_END;
 
     daddr.sin_addr.s_addr = 0xffffffffu;
 
-    assert ((q - rbp->bp_vend + 1) <= DHCP_OPT_LEN);
+    assert(q <= end);
 
-    m->m_len = sizeof(struct bootp_t) + (q - rbp->bp_vend + 1) - sizeof(struct ip) - sizeof(struct udphdr);
+    m->m_len = sizeof(struct bootp_t) + (end - rbp->bp_vend) - sizeof(struct ip) - sizeof(struct udphdr);
     udp_output(NULL, m, &saddr, &daddr, IPTOS_LOWDELAY);
 }
 
@@ -369,7 +392,7 @@ void bootp_input(struct mbuf *m)
 {
     struct bootp_t *bp = mtod_check(m, sizeof(struct bootp_t));
 
-    if (bp && bp->bp_op == BOOTP_REQUEST) {
+    if (!m->slirp->disable_dhcp && bp && bp->bp_op == BOOTP_REQUEST) {
         bootp_reply(m->slirp, bp, m_end(m));
     }
 }

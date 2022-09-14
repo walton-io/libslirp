@@ -177,7 +177,7 @@ void udp_input(register struct mbuf *m, int iphlen)
          * If there's no socket for this packet,
          * create one
          */
-        so = socreate(slirp);
+        so = socreate(slirp, IPPROTO_UDP);
         if (udp_attach(so, AF_INET) == -1) {
             DEBUG_MISC(" udp_attach errno = %d-%s", errno, strerror(errno));
             sofree(so);
@@ -251,6 +251,8 @@ int udp_output(struct socket *so, struct mbuf *m, struct sockaddr_in *saddr,
                struct sockaddr_in *daddr, int iptos)
 {
     Slirp *slirp = m->slirp;
+    char addr[INET_ADDRSTRLEN];
+
     M_DUP_DEBUG(slirp, m, 0, sizeof(struct udpiphdr));
 
     register struct udpiphdr *ui;
@@ -259,8 +261,8 @@ int udp_output(struct socket *so, struct mbuf *m, struct sockaddr_in *saddr,
     DEBUG_CALL("udp_output");
     DEBUG_ARG("so = %p", so);
     DEBUG_ARG("m = %p", m);
-    DEBUG_ARG("saddr = %s", inet_ntoa(saddr->sin_addr));
-    DEBUG_ARG("daddr = %s", inet_ntoa(daddr->sin_addr));
+    DEBUG_ARG("saddr = %s", inet_ntop(AF_INET, &saddr->sin_addr, addr, sizeof(addr)));
+    DEBUG_ARG("daddr = %s", inet_ntop(AF_INET, &daddr->sin_addr, addr, sizeof(addr)));
 
     /*
      * Adjust for header
@@ -329,7 +331,7 @@ int udp_attach(struct socket *so, unsigned short af)
 #endif
 
         so->so_expire = curtime + SO_EXPIRE;
-        insque(so, &so->slirp->udb);
+        slirp_insque(so, &so->slirp->udb);
     }
     so->slirp->cb->register_poll_fd(so->s, so->slirp->opaque);
     return (so->s);
@@ -371,7 +373,7 @@ struct socket *udpx_listen(Slirp *slirp,
     socklen_t addrlen;
     int save_errno;
 
-    so = socreate(slirp);
+    so = socreate(slirp, IPPROTO_UDP);
     so->s = slirp_socket(haddr->sa_family, SOCK_DGRAM, 0);
     if (so->s < 0) {
         save_errno = errno;
@@ -382,7 +384,7 @@ struct socket *udpx_listen(Slirp *slirp,
     if (haddr->sa_family == AF_INET6)
         slirp_socket_set_v6only(so->s, (flags & SS_HOSTFWD_V6ONLY) != 0);
     so->so_expire = curtime + SO_EXPIRE;
-    insque(so, &slirp->udb);
+    slirp_insque(so, &slirp->udb);
 
     if (bind(so->s, haddr, haddrlen) < 0) {
         save_errno = errno;

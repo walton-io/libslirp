@@ -82,9 +82,6 @@ static void tcp_xmit_timer(register struct tcpcb *tp, int rtt);
 static int tcp_reass(register struct tcpcb *tp, register struct tcpiphdr *ti,
                      struct mbuf *m)
 {
-    if (m)
-        M_DUP_DEBUG(m->slirp, m, 0, 0);
-
     register struct tcpiphdr *q;
     struct socket *so = tp->t_socket;
     int flags;
@@ -149,14 +146,14 @@ static int tcp_reass(register struct tcpcb *tp, register struct tcpiphdr *ti,
         }
         q = tcpiphdr_next(q);
         m = tcpiphdr_prev(q)->ti_mbuf;
-        remque(tcpiphdr2qlink(tcpiphdr_prev(q)));
+        slirp_remque(tcpiphdr2qlink(tcpiphdr_prev(q)));
         m_free(m);
     }
 
     /*
      * Stick new segment in its place.
      */
-    insque(tcpiphdr2qlink(ti), tcpiphdr2qlink(tcpiphdr_prev(q)));
+    slirp_insque(tcpiphdr2qlink(ti), tcpiphdr2qlink(tcpiphdr_prev(q)));
 
 present:
     /*
@@ -173,7 +170,7 @@ present:
     do {
         tp->rcv_nxt += ti->ti_len;
         flags = ti->ti_flags & TH_FIN;
-        remque(tcpiphdr2qlink(ti));
+        slirp_remque(tcpiphdr2qlink(ti));
         m = ti->ti_mbuf;
         ti = tcpiphdr_next(ti);
         if (so->so_state & SS_FCANTSENDMORE)
@@ -217,6 +214,9 @@ void tcp_input(struct mbuf *m, int iphlen, struct socket *inso,
 
     DEBUG_CALL("tcp_input");
     DEBUG_ARG("m = %p  iphlen = %2d  inso = %p", m, iphlen, inso);
+
+    memset(&lhost, 0, sizeof(struct sockaddr_storage));
+    memset(&fhost, 0, sizeof(struct sockaddr_storage));
 
     /*
      * If called with m == 0, then we're continuing the connect
@@ -420,7 +420,7 @@ findso:
         if ((tiflags & (TH_SYN | TH_FIN | TH_RST | TH_URG | TH_ACK)) != TH_SYN)
             goto dropwithreset;
 
-        so = socreate(slirp);
+        so = socreate(slirp, IPPROTO_TCP);
         tcp_attach(so);
 
         sbreserve(&so->so_snd, TCP_SNDSPACE);
